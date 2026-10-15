@@ -245,7 +245,10 @@ class A11yService : AccessibilityService() {
         if (android.os.Build.VERSION.SDK_INT < 30) return null
         val latch = CountDownLatch(1)
         var png: ByteArray? = null
-        takeScreenshot(
+        // takeScreenshot can throw (the emulator's system image rejects it), so
+        // never let that escape: the caller falls back to MediaProjection.
+        try {
+          takeScreenshot(
             android.view.Display.DEFAULT_DISPLAY,
             screenshotExecutor,
             object : TakeScreenshotCallback {
@@ -270,7 +273,11 @@ class A11yService : AccessibilityService() {
                     latch.countDown()
                 }
             },
-        )
+          )
+        } catch (e: Throwable) {
+            android.util.Log.w("easystream", "takeScreenshot threw: $e")
+            return null
+        }
         if (!latch.await(5, TimeUnit.SECONDS)) {
             android.util.Log.w("easystream", "takeScreenshot timed out")
         }

@@ -26,9 +26,11 @@ object Video {
     /** stop pauses the capture loop (it rebuilds on the next start()). */
     fun stop() {
         running = false
-        // Give the loop a moment to notice and release the VirtualDisplay.
-        val deadline = System.currentTimeMillis() + 1500
-        while (Screen.projection != null && System.currentTimeMillis() < deadline) {
+        // The loop exits on its next iteration and releases the display (which
+        // happens inside streamAnnexB's finally). Wait for it to actually be
+        // gone — checking `projection` was wrong: the grant is never nulled.
+        val deadline = System.currentTimeMillis() + 2500
+        while (Screen.hasCaptureDisplay() && System.currentTimeMillis() < deadline) {
             Thread.sleep(50)
         }
     }

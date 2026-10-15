@@ -82,6 +82,10 @@ object Screen {
     /** releaseDisplayPublic tears down the screenshot display (for the streamer). */
     fun releaseDisplayPublic() = releaseDisplay()
 
+    /** hasCaptureDisplay reports whether a VirtualDisplay currently exists.
+     *  The screenshot path waits on this before taking the projection over. */
+    fun hasCaptureDisplay(): Boolean = display != null
+
     /** screenshotBytes captures one frame as PNG bytes (for the est shot reply). */
     fun screenshotBytes(): ByteArray? {
         if (projection == null) return null

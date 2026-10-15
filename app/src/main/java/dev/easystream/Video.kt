@@ -15,6 +15,23 @@ import kotlin.concurrent.thread
 object Video {
     private val subs = CopyOnWriteArrayList<(ByteArray) -> Unit>()
     @Volatile private var started = false
+    /// `running` gates the capture loop. A screenshot needs the projection's
+    /// single VirtualDisplay for itself, so it flips this off, captures, and
+    /// flips it back on — the loop then re-creates its display.
+    @Volatile private var running = true
+
+    /** isRunning reports whether the capture loop is currently streaming. */
+    fun isRunning(): Boolean = started && running
+
+    /** stop pauses the capture loop (it rebuilds on the next start()). */
+    fun stop() {
+        running = false
+        // Give the loop a moment to notice and release the VirtualDisplay.
+        val deadline = System.currentTimeMillis() + 1500
+        while (Screen.projection != null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50)
+        }
+    }
     // The last IDR access unit (already carries SPS/PPS). Replayed to a new
     // subscriber so it can decode immediately: a VirtualDisplay only emits a
     // frame when the screen CHANGES, so a late joiner on a static screen would
@@ -33,6 +50,9 @@ object Video {
     }
 
     fun start() {
+        // A screenshot may have paused the loop (see stop()); resume it. The
+        // thread itself is still alive and will re-create its display.
+        running = true
         synchronized(this) {
             if (started) return
             started = true
@@ -54,7 +74,9 @@ object Video {
                     // so the streamed frame and the input coordinate space match.
                     // With scale = 2 the video was 960x540 and every tap landed at
                     // half the intended position.
-                    val r = streamAnnexB(fps = 30, scale = 1, stop = { false }) { au ->
+                    // stop() must honour the screenshot hand-off: when it flips
+                    // `running` off, the loop exits and releases the display.
+                    val r = streamAnnexB(fps = 30, scale = 1, stop = { !running }) { au ->
                         if (hasIDR(au)) lastKey = au
                         for (s in subs) {
                             try { s(au) } catch (_: Exception) {}

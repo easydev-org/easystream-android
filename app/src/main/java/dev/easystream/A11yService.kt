@@ -247,7 +247,7 @@ class A11yService : AccessibilityService() {
         var png: ByteArray? = null
         takeScreenshot(
             android.view.Display.DEFAULT_DISPLAY,
-            java.util.concurrent.Executors.newSingleThreadExecutor(),
+            screenshotExecutor,
             object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
                     try {
@@ -258,16 +258,26 @@ class A11yService : AccessibilityService() {
                             png = bos.toByteArray()
                             bmp.recycle()
                         }
-                    } catch (_: Exception) {
+                    } catch (e: Exception) {
+                        android.util.Log.w("easystream", "takeScreenshot onSuccess: $e")
                     } finally {
                         result.hardwareBuffer.close()
                         latch.countDown()
                     }
                 }
-                override fun onFailure(errorCode: Int) { latch.countDown() }
+                override fun onFailure(errorCode: Int) {
+                    android.util.Log.w("easystream", "takeScreenshot failed: $errorCode")
+                    latch.countDown()
+                }
             },
         )
-        latch.await(5, TimeUnit.SECONDS)
+        if (!latch.await(5, TimeUnit.SECONDS)) {
+            android.util.Log.w("easystream", "takeScreenshot timed out")
+        }
         return png
     }
+
+    /** A long-lived executor: a fresh one per call was collected before the
+     *  callback fired, so takeScreenshot never answered. */
+    private val screenshotExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 }

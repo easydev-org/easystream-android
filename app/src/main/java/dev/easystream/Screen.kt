@@ -124,6 +124,12 @@ object Screen {
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            // The VirtualDisplay is change-driven: a static screen emits NO
+            // frames, so the stream would freeze until the next change. Ask the
+            // encoder to re-emit the previous frame after this interval instead
+            // of "nudging" the UI with a real swipe (which scrolled/perturbed
+            // whatever the user was doing — it fought the notification shade).
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
         }
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -149,18 +155,8 @@ object Screen {
             // VirtualDisplay drives the frame rate; we must keep pulling output
             // the whole time or the encoder's buffers back up.
             val captureEndsAt = System.currentTimeMillis() + (frames * 1000L / fps)
-            var nextNudge = 0L
             while (System.currentTimeMillis() < captureEndsAt) {
                 sink.drainBlocking(codec, 20_000)
-                // A VirtualDisplay only emits a frame when the screen changes, so
-                // a static screen yields almost no frames. Nudge the UI ~3x/s so
-                // the encoder actually receives a stream.
-                if (System.currentTimeMillis() >= nextNudge) {
-                    val svc = A11yService.instance
-                    val h = metrics().second
-                    svc?.swipeAt(w / 2f, h * 0.65f, w / 2f, h * 0.35f, 100)
-                    nextNudge = System.currentTimeMillis() + 300
-                }
             }
             // Surface mode ends via signalEndOfInputStream, then we drain until
             // the EOS flag actually arrives (a single timeout is NOT the end).
@@ -374,6 +370,13 @@ fun streamAnnexB(fps: Int, scale: Int, stop: () -> Boolean, sink: AuSink): Strin
         setInteger(MediaFormat.KEY_BIT_RATE, 12_000_000)
         setInteger(MediaFormat.KEY_FRAME_RATE, fps)
         setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+        // The VirtualDisplay is change-driven: a static screen emits NO frames.
+        // Ask the encoder to re-emit the previous frame after this interval so
+        // the stream stays alive WITHOUT poking the UI. (The old code called
+        // touchDown/touchUp at the screen centre every ~20 ms, which fired a
+        // real TAP on whatever was under the centre — that swallowed the user's
+        // clicks and fought their drags.)
+        setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / fps)
     }
     // Prefer the Codec2 encoder: c2.android.avc.encoder is markedly faster than
     // the OMX.google reference encoder on the emulator. Fall back to whatever
@@ -426,16 +429,11 @@ fun streamAnnexB(fps: Int, scale: Int, stop: () -> Boolean, sink: AuSink): Strin
             val idx = codec.dequeueOutputBuffer(info, 20_000)
             if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue
             if (idx < 0) {
-                // A VirtualDisplay only emits a frame when the screen changes;
-                // nudge the pointer so a static screen still yields frames.
                 val now = System.currentTimeMillis()
                 if (now - lastKeyReq > 1000) {
                     lastKeyReq = now
                     try { codec.setParameters(syncParams) } catch (_: Exception) {}
                 }
-                val svc = A11yService.instance
-                svc?.touchDown((w / 2).toFloat(), (h / 2).toFloat())
-                svc?.touchUp()
                 val nowMs = System.currentTimeMillis()
                 if (nowMs - lastReport >= 3000) {
                     System.err.println("est video: perf fps=$frames/3s avgEncodeUs=${if (frames > 0) encodeNanos / frames / 1000 else 0}")

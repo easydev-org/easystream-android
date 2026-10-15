@@ -148,6 +148,50 @@ class A11yService : AccessibilityService() {
         return n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
+    /**
+     * typeChar appends ONE character to the focused editable node.
+     *
+     * The est TEXT frame is typed a character at a time (matching the Rust
+     * daemon's per-character key injection). A single ACTION_SET_TEXT that
+     * REPLACED the node's whole text both clobbered existing content and needed
+     * a second keystroke to register — the "type twice for one character"
+     * symptom. Appending preserves every character.
+     */
+    fun typeChar(c: Char): Boolean {
+        val n = editableFocused() ?: return false
+        val cur = n.text?.toString() ?: ""
+        val s = n.textSelectionStart
+        val e = n.textSelectionEnd
+        val next = if (s in 0..e && e <= cur.length) {
+            cur.substring(0, s) + c + cur.substring(e)
+        } else {
+            cur + c
+        }
+        val args = android.os.Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, next)
+        }
+        return n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    /** editableFocused returns the focused editable node, else the first editable one. */
+    private fun editableFocused(): AccessibilityNodeInfo? {
+        for (root in roots(all = true)) {
+            val hit = searchEditable(root)
+            if (hit != null) return hit
+        }
+        return null
+    }
+
+    private fun searchEditable(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (n.isEditable && n.isFocused) return n
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            val hit = searchEditable(c)
+            if (hit != null) return hit
+        }
+        return null
+    }
+
     /** focusNode focuses the first node matching [sel]. */
     fun focusNode(sel: Selector): Boolean {
         val n = first(sel) ?: return false

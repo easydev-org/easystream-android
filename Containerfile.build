@@ -1,0 +1,17 @@
+# Build the Android easystream APK with the SHARED web UI packaged.
+#
+# The UI is not vendored: build-webui.sh fetches it from
+# easydev-org/easystream-webui into app/src/main/assets/webui/, which gradle
+# packs into the APK's assets.
+ARG REGISTRY=artifact.worker.svc.cluster.local
+FROM ${REGISTRY}/toolchain/android:latest
+
+ARG WEBUI_REF=main
+ARG HTTPS_PROXY
+ARG HTTP_PROXY
+ENV HTTPS_PROXY=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY}
+
+WORKDIR /src
+COPY . /src/
+RUN bash build-webui.sh && ls -la app/src/main/assets/webui
+RUN ./gradlew --no-daemon assembleRelease

@@ -137,14 +137,45 @@ class Est(private val port: Int) {
 
     @Volatile private var lastX = 0f
     @Volatile private var lastY = 0f
+    // Mouse press/drag: a click is a press+release at ~the same spot, a DRAG is
+    // a press, a move, then a release. The old code fired a tap on button-down
+    // and ignored the moves, so dragging (e.g. pulling the notification shade
+    // down from the top) never became a swipe.
+    @Volatile private var pressed = false
+    @Volatile private var downX = 0f
+    @Volatile private var downY = 0f
 
     private fun dispatch(typ: Int, b: ByteArray, write: (Int, ByteArray) -> Unit) {
         val svc = A11yService.instance
         when (typ) {
             // Mouse: a REAL pointer (hover + buttons + scroll).
             T_MOVE -> { lastX = u16(b, 0).toFloat(); lastY = u16(b, 2).toFloat() }
-            T_BUTTON -> if (b.size >= 2 && b[1].toInt() != 0) svc?.tapAt(lastX, lastY, 40)
-            T_SCROLL -> { val dx = i16(b, 4); val dy = i16(b, 6); svc?.swipeAt(lastX, lastY, lastX + dx, lastY + dy, 120) }
+            T_BUTTON -> if (b.size >= 2) {
+                if (b[1].toInt() != 0) {
+                    pressed = true; downX = lastX; downY = lastY
+                } else if (pressed) {
+                    pressed = false
+                    val dist = kotlin.math.hypot((lastX - downX).toDouble(), (lastY - downY).toDouble())
+                    // A real drag (>=24px) is a swipe; anything smaller is a tap.
+                    if (dist >= 24.0) svc?.swipeAt(downX, downY, lastX, lastY, 200)
+                    else svc?.tapAt(lastX, lastY, 40)
+                }
+            }
+            // Scroll: the wheel deltas are in PIXELS and can be small (a notch
+            // is ~100), which is far too short to register as a swipe. Use the
+            // wheel's OWN coordinates (not the last MOVE) and scale the delta
+            // up, then run it as a flick in the OPPOSITE direction (scrolling
+            // down moves the content up, i.e. the finger moves up).
+            T_SCROLL -> {
+                val wx = u16(b, 0).toFloat()
+                val wy = u16(b, 2).toFloat()
+                val dx = i16(b, 4)
+                val dy = i16(b, 6)
+                val gain = 3f
+                val sx = wx + dx * gain
+                val sy = wy + dy * gain
+                svc?.swipeAt(wx, wy, sx, sy, 180)
+            }
             // Touch: the real touchscreen (finger).
             T_TOUCH -> when (b[0].toInt() and 0xff) {
                 0 -> svc?.touchDown(u16(b, 1).toFloat(), u16(b, 3).toFloat())
@@ -161,7 +192,18 @@ class Est(private val port: Int) {
                     if (b[1 + n + 4].toInt() != 0) injectKey(name, ch)
                 }
             }
-            T_TEXT -> svc?.setText(Selector(""), String(b))
+            // Type TEXT character by character through the IME path. The old
+            // single ACTION_SET_TEXT on the first node REPLACED that node's whole
+            // text (and needed a second keystroke to take effect), so typing
+            // appeared to drop every other character.
+            // Prefer the IME (commitText handles UTF-8 and never clobbers the
+            // editor); fall back to per-character accessibility text setting.
+            T_TEXT -> {
+                val text = String(b, Charsets.UTF_8)
+                if (text.isNotEmpty() && EasyIme.instance?.commitText(text) != true) {
+                    for (ch in text) svc?.typeChar(ch)
+                }
+            }
             T_PING -> write(T_PONG, b)
             else -> dispatchA11y(typ, b, write)
         }
@@ -232,11 +274,21 @@ class Est(private val port: Int) {
      */
     private fun injectKey(name: String, ch: Int) {
         when (name) {
-            "Back" -> { A11yService.instance?.systemKey(AccessibilityService.GLOBAL_ACTION_BACK); return }
-            "Home" -> { A11yService.instance?.systemKey(AccessibilityService.GLOBAL_ACTION_HOME); return }
-            "Return", "Meta" -> { A11yService.instance?.systemKey(AccessibilityService.GLOBAL_ACTION_RECENTS); return }
+            // Android SYSTEM keys are explicit names — they must NOT steal the
+            // normal PC keys. (Return used to be mapped to "recents", so pressing
+            // Enter opened the task switcher.)
+            "SystemBack", "Back" ->
+                { A11yService.instance?.systemKey(AccessibilityService.GLOBAL_ACTION_BACK); return }
+            "SystemHome" ->
+                { A11yService.instance?.systemKey(AccessibilityService.GLOBAL_ACTION_HOME); return }
+            "Recents", "AppSwitch" ->
+                { A11yService.instance?.systemKey(AccessibilityService.GLOBAL_ACTION_RECENTS); return }
+            "Notifications" ->
+                { A11yService.instance?.systemKey(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS); return }
         }
-        if (name == "Control" || name == "Alt" || name == "Shift" || name == "Meta") return // modifiers need no event of their own
+        // Modifiers produce no event of their own (their effect is applied by
+        // the daemon when the following key is pressed).
+        if (name == "Control" || name == "Alt" || name == "Shift" || name == "Meta") return
         val kc = Keys.code(name) ?: if (name.length == 1) Keys.code(name) else null
         if (kc != null) {
             execKey(kc)
@@ -245,7 +297,14 @@ class Est(private val port: Int) {
         }
     }
 
+    /**
+     * execKey injects one key. `input keyevent` needs INJECT_EVENTS (shell /
+     * system), which an app cannot hold, so route through our headless IME
+     * (InputConnection.sendKeyEvent) — that is the only non-system way. Fall
+     * back to `input` for the (unlikely) case where the IME is not yet bound.
+     */
     private fun execKey(keycode: Int) {
+        if (EasyIme.instance?.sendKey(keycode) == true) return
         try {
             Runtime.getRuntime().exec(arrayOf("input", "keyevent", keycode.toString()))
         } catch (_: Exception) {}

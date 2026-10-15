@@ -1,0 +1,6 @@
+# The web UI is NOT vendored here: it lives in the single shared repo
+# easydev-org/easystream-webui and is fetched at BUILD time (build-webui.sh)
+# into app/src/main/assets/webui/ (packaged into the APK by gradle).
+app/src/main/assets/webui/
+app/build/
+.gradle/

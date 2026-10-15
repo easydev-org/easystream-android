@@ -52,3 +52,17 @@ WORKDIR /src
 COPY . /src/
 RUN bash build-webui.sh && ls -la app/src/main/assets/webui
 RUN gradle --no-daemon assembleRelease
+
+# assembleRelease produces an UNSIGNED apk, which the guest's `adb install`
+# rejects ("apk install failed"). Sign it with a throwaway debug key here so the
+# published artifact is directly installable.
+RUN set -eux; \
+    BT="$(ls -d /opt/android-sdk/build-tools/* | sort -V | tail -1)"; \
+    keytool -genkeypair -keystore /tmp/debug.keystore -storepass android -keypass android \
+      -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 \
+      -validity 10000 >/dev/null; \
+    "$BT/zipalign" -f 4 app/build/outputs/apk/release/app-release-unsigned.apk /tmp/aligned.apk; \
+    "$BT/apksigner" sign --ks /tmp/debug.keystore --ks-pass pass:android --key-pass pass:android \
+      --ks-key-alias androiddebugkey --out /easystream.apk /tmp/aligned.apk; \
+    "$BT/apksigner" verify /easystream.apk; \
+    ls -la /easystream.apk

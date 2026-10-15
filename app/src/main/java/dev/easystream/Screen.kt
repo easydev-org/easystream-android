@@ -88,13 +88,14 @@ object Screen {
 
     /** screenshotBytes captures one frame as PNG bytes (for the est shot reply). */
     fun screenshotBytes(): ByteArray? {
+        // Prefer the accessibility service's takeScreenshot: it is independent
+        // of MediaProjection, so it works WHILE the video pipeline owns the
+        // projection's single VirtualDisplay (releasing that display would
+        // invalidate the token — see A11yService.takeScreenshotPng).
+        A11yService.instance?.takeScreenshotPng()?.let { return it }
+        // Fallback: the MediaProjection path (only usable when the pipeline is
+        // not running).
         if (projection == null) return null
-        // The video pipeline owns the projection's ONE VirtualDisplay (it feeds
-        // the encoder's input surface), so the ImageReader-backed screenshot
-        // display cannot coexist with it. Stop the stream, take the shot, and
-        // let the pipeline rebuild itself on its next loop.
-        val wasStreaming = Video.isRunning()
-        if (wasStreaming) Video.stop()
         val tmp = java.io.File.createTempFile("shot", ".png")
         return try {
             val r = screenshot(tmp.absolutePath)
@@ -103,7 +104,6 @@ object Screen {
             null
         } finally {
             tmp.delete()
-            if (wasStreaming) Video.start()
         }
     }
 

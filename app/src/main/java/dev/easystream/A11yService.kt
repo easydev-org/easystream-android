@@ -229,4 +229,45 @@ class A11yService : AccessibilityService() {
 
     /** systemKey triggers a global action (BACK/HOME/RECENTS/NOTIFICATIONS). */
     fun systemKey(action: Int): Boolean = performGlobalAction(action)
+
+    /**
+     * takeScreenshotPng grabs the screen via AccessibilityService.takeScreenshot
+     * (API 30+).
+     *
+     * This is the ONLY way to screenshot WHILE the easystream video pipeline is
+     * running: a MediaProjection token allows exactly ONE VirtualDisplay, and
+     * once the pipeline releases its own the token is invalidated ("Reusing
+     * token: Throw exception due to invalid projection"), so a second
+     * MediaProjection capture can never work. takeScreenshot is independent of
+     * MediaProjection and does not disturb the stream.
+     */
+    fun takeScreenshotPng(): ByteArray? {
+        if (android.os.Build.VERSION.SDK_INT < 30) return null
+        val latch = CountDownLatch(1)
+        var png: ByteArray? = null
+        takeScreenshot(
+            android.view.Display.DEFAULT_DISPLAY,
+            java.util.concurrent.Executors.newSingleThreadExecutor(),
+            object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    try {
+                        val bmp = android.graphics.Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                        if (bmp != null) {
+                            val bos = java.io.ByteArrayOutputStream()
+                            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, bos)
+                            png = bos.toByteArray()
+                            bmp.recycle()
+                        }
+                    } catch (_: Exception) {
+                    } finally {
+                        result.hardwareBuffer.close()
+                        latch.countDown()
+                    }
+                }
+                override fun onFailure(errorCode: Int) { latch.countDown() }
+            },
+        )
+        latch.await(5, TimeUnit.SECONDS)
+        return png
+    }
 }

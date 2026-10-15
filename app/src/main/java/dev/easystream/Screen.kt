@@ -86,43 +86,18 @@ object Screen {
      *  The screenshot path waits on this before taking the projection over. */
     fun hasCaptureDisplay(): Boolean = display != null
 
-    /** streaming is set by the video pipeline while it holds the projection's
-     *  single VirtualDisplay. The screenshot path waits for it to clear. */
-    @Volatile var streaming = false
-
     /** screenshotBytes captures one frame as PNG bytes (for the est shot reply). */
     fun screenshotBytes(): ByteArray? {
-        // Prefer the accessibility service's takeScreenshot: it is independent
-        // of MediaProjection, so it works WHILE the video pipeline owns the
-        // projection's single VirtualDisplay (releasing that display would
-        // invalidate the token — see A11yService.takeScreenshotPng).
-        val svc = A11yService.instance
-        android.util.Log.i("easystream", "screenshotBytes: svc=${svc != null} projection=${projection != null}")
-        svc?.takeScreenshotPng()?.let {
-            android.util.Log.i("easystream", "screenshotBytes: takeScreenshot -> ${it.size} bytes")
-            return it
-        }
-        android.util.Log.i("easystream", "screenshotBytes: falling back to MediaProjection")
-        // Fallback: the MediaProjection path. It needs the projection's single
-        // VirtualDisplay, so pause the pipeline and wait for it to actually
-        // release (Screen.streaming), then let it rebuild.
-        if (projection == null) return null
-        val wasStreaming = Video.isRunning()
-        if (wasStreaming) {
-            Video.stop()
-            val deadline = System.currentTimeMillis() + 3000
-            while (streaming && System.currentTimeMillis() < deadline) Thread.sleep(50)
-        }
-        val tmp = java.io.File.createTempFile("shot", ".png")
-        return try {
-            val r = screenshot(tmp.absolutePath)
-            if (r.startsWith("error")) null else tmp.readBytes()
-        } catch (_: Exception) {
-            null
-        } finally {
-            tmp.delete()
-            if (wasStreaming) Video.start()
-        }
+        // AccessibilityService.takeScreenshot ONLY. It goes through
+        // SurfaceFlinger's screenshot channel, so it is completely independent
+        // of MediaProjection: the video pipeline keeps streaming, untouched.
+        //
+        // (The MediaProjection path could not work at all: one token allows
+        // exactly ONE VirtualDisplay, which the pipeline owns, and releasing it
+        // invalidates the token. And pausing the stream to grab a frame — which
+        // this used to do — is unacceptable: a screenshot must never disturb
+        // the video.)
+        return A11yService.instance?.takeScreenshotPng()
     }
 
     /** screenshot captures one frame and writes a PNG to [out]. */
@@ -432,9 +407,6 @@ fun streamAnnexB(fps: Int, scale: Int, stop: () -> Boolean, sink: AuSink): Strin
         codec.stop(); codec.release(); inputSurface.release()
         return "error: createVirtualDisplay: ${e.message}"
     }
-    // Publish "the pipeline holds the projection's single VirtualDisplay" so
-    // the screenshot path can wait for us to let go (and know when we are back).
-    Screen.streaming = true
     // Start the encoder AFTER the display exists (MediaRecorder's order):
     // starting it first gave a display the encoder never pulled frames from.
     codec.start()
@@ -495,8 +467,6 @@ fun streamAnnexB(fps: Int, scale: Int, stop: () -> Boolean, sink: AuSink): Strin
             codec.releaseOutputBuffer(idx, false)
         }
     } finally {
-        // Released: the screenshot path is now free to take the projection over.
-        Screen.streaming = false
         vd.release()
         codec.stop(); codec.release(); inputSurface.release()
     }

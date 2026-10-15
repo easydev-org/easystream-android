@@ -73,6 +73,23 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
 
     private fun a11yRoute(out: OutputStream, path: String, query: String) {
         val params = parseQuery(query)
+        // /a11y/screenshot returns PNG BYTES (A11Y_HTTP.md), not a file name.
+        if (path == "/a11y/screenshot") {
+            val png = Screen.screenshotBytes()
+            if (png == null) {
+                respond(out, 500, "text/plain; charset=utf-8", "error: no screen capture")
+            } else {
+                respond(out, 200, "image/png", png)
+            }
+            return
+        }
+        // Input verbs are not Commands paths (they need the a11y service and
+        // the pointer state), so dispatch them here.
+        val input = inputRoute(path, params)
+        if (input != null) {
+            respond(out, if (input.startsWith("error")) 500 else 200, "text/plain; charset=utf-8", input)
+            return
+        }
         val cmd = when (path) {
             "/a11y/apps" -> "/apps"
             "/a11y/tree" -> "/tree"
@@ -85,16 +102,45 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
                 "settext", "setvalue" -> "/settext"
                 else -> "/click"
             }
-            "/a11y/screenshot" -> "/screenshot"
-            "/a11y/clipboard" -> if (params.containsKey("set")) "/clipboard-set" else "/clipboard-get"
+            // The spec's clipboard write is `?set=TEXT` (the daemon used
+            // `?text=`), so normalise it here.
+            "/a11y/clipboard" ->
+                if (params.containsKey("set")) "/clipboard-set" else "/clipboard-get"
             else -> null
         }
         if (cmd == null) {
             respond(out, 404, "text/plain", "unknown a11y path")
             return
         }
-        val body = runCatching { Commands.dispatch(cmd, params) }.getOrElse { "error: ${it.message}" }
+        val p = if (cmd == "/clipboard-set") params + ("text" to (params["set"] ?: "")) else params
+        val body = runCatching { Commands.dispatch(cmd, p) }.getOrElse { "error: ${it.message}" }
         respond(out, if (body.startsWith("error")) 500 else 200, "text/plain; charset=utf-8", body)
+    }
+
+    /// inputRoute handles the A11Y_HTTP input verbs. Returns null when `path`
+    /// is not an input verb.
+    private fun inputRoute(path: String, p: Map<String, String>): String? {
+        val svc = A11yService.instance ?: return "error: no accessibility service"
+        fun n(k: String) = p[k]?.toFloatOrNull() ?: 0f
+        return when (path) {
+            "/a11y/click" -> {
+                val count = (p["count"]?.toIntOrNull() ?: 1).coerceAtLeast(1)
+                repeat(count) { svc.tapAt(n("x"), n("y")) }
+                "ok"
+            }
+            "/a11y/type" -> {
+                val text = p["text"] ?: ""
+                if (text.isNotEmpty() && EasyIme.instance?.commitText(text) != true) {
+                    for (ch in text) svc.typeChar(ch)
+                }
+                "ok"
+            }
+            "/a11y/key" -> { Est.injectKeyByName(p["name"] ?: ""); "ok" }
+            "/a11y/scroll" ->
+                { svc.swipeAt(n("x"), n("y"), n("x") + n("dx"), n("y") + n("dy"), 180); "ok" }
+            "/a11y/drag" -> { svc.swipeAt(n("x1"), n("y1"), n("x2"), n("y2"), (p["ms"]?.toLongOrNull() ?: 200L)); "ok" }
+            else -> null
+        }
     }
 
     private fun parseQuery(query: String): Map<String, String> {
@@ -116,6 +162,15 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
             "Content-Type: $ctype\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
         out.write(head.toByteArray())
         out.write(bytes)
+        out.flush()
+    }
+
+    /// respondBytes sends a binary body (used by /a11y/screenshot).
+    private fun respond(out: OutputStream, status: Int, ctype: String, body: ByteArray) {
+        val head = "HTTP/1.1 $status ${if (status == 200) "OK" else "Error"}\r\n" +
+            "Content-Type: $ctype\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
+        out.write(head.toByteArray())
+        out.write(body)
         out.flush()
     }
 

@@ -25,6 +25,27 @@ class Est(private val port: Int) {
 
     companion object {
         private const val T_HELLO = 0x01
+
+        /// injectKeyByName is the HTTP entry point for /a11y/key: it maps an
+        /// A11Y_HTTP key name to the same handling the est T_KEY frame uses.
+        fun injectKeyByName(name: String) {
+            val kc = Keys.code(name)
+            if (kc != null) {
+                if (EasyIme.instance?.sendKey(kc) == true) return
+                runCatching { Runtime.getRuntime().exec(arrayOf("input", "keyevent", kc.toString())) }
+                return
+            }
+            when (name.lowercase()) {
+                "back", "systemback" ->
+                    A11yService.instance?.systemKey(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+                "systemhome" ->
+                    A11yService.instance?.systemKey(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+                "recents", "appswitch" ->
+                    A11yService.instance?.systemKey(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS)
+                "notifications" ->
+                    A11yService.instance?.systemKey(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
+            }
+        }
         private const val T_VIDEO = 0x02
         private const val T_MOVE = 0x10
         private const val T_BUTTON = 0x11

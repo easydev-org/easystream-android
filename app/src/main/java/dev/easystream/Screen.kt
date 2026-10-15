@@ -85,15 +85,20 @@ object Screen {
     /** screenshotBytes captures one frame as PNG bytes (for the est shot reply). */
     fun screenshotBytes(): ByteArray? {
         if (projection == null) return null
-        val r = ensureDisplay()
-        val img = awaitImage(r) ?: return null
-        try {
-            val bmp = imageToBitmap(img)
-            val bos = java.io.ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.PNG, 100, bos)
-            bmp.recycle()
-            return bos.toByteArray()
-        } finally { img.close() }
+        // The video pipeline owns the projection's ONE VirtualDisplay, so a
+        // second ImageReader capture (ensureDisplay/awaitImage) gets no frames
+        // and returns null. Go through the proven one-shot path instead: it
+        // briefly takes the display, writes a PNG, and returns — then read the
+        // bytes back.
+        val tmp = java.io.File.createTempFile("shot", ".png")
+        return try {
+            val r = screenshot(tmp.absolutePath)
+            if (r.startsWith("error")) null else tmp.readBytes()
+        } catch (_: Exception) {
+            null
+        } finally {
+            tmp.delete()
+        }
     }
 
     /** screenshot captures one frame and writes a PNG to [out]. */

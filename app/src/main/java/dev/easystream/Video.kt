@@ -26,13 +26,11 @@ object Video {
     /** stop pauses the capture loop (it rebuilds on the next start()). */
     fun stop() {
         running = false
-        // The loop exits on its next iteration and releases the display (which
-        // happens inside streamAnnexB's finally). Wait for it to actually be
-        // gone — checking `projection` was wrong: the grant is never nulled.
-        val deadline = System.currentTimeMillis() + 2500
-        while (Screen.hasCaptureDisplay() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(50)
-        }
+        // The loop notices `running` within one iteration (its dequeue timeout
+        // is 20 ms) and releases its VirtualDisplay in the finally block. The
+        // display belongs to streamAnnexB, not Screen, so there is no flag to
+        // poll — wait a fixed, generous interval instead.
+        Thread.sleep(800)
     }
     // The last IDR access unit (already carries SPS/PPS). Replayed to a new
     // subscriber so it can decode immediately: a VirtualDisplay only emits a

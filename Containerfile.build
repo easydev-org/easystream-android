@@ -1,17 +1,54 @@
 # Build the Android easystream APK with the SHARED web UI packaged.
 #
-# The UI is not vendored: build-webui.sh fetches it from
-# easydev-org/easystream-webui into app/src/main/assets/webui/, which gradle
-# packs into the APK's assets.
-ARG REGISTRY=artifact.worker.svc.cluster.local
-FROM ${REGISTRY}/toolchain/android:latest
+# Base is an official Docker Hub image (eclipse-temurin = library namespace);
+# the Android SDK + gradle are installed here because there is no official
+# Android SDK image. buildkitd mirrors docker.io to the in-cluster registry, so
+# `FROM docker.io/...` resolves without internet.
+#
+#   buildctl build --frontend dockerfile.v0 \
+#     --local context=. --local dockerfile=. --opt filename=Containerfile.build \
+#     --opt build-arg:HTTPS_PROXY=http://mihomo.develop.svc.cluster.local:7890
+ARG REGISTRY=docker.io/library
+FROM ${REGISTRY}/eclipse-temurin:21-jdk
 
 ARG WEBUI_REF=main
 ARG HTTPS_PROXY
 ARG HTTP_PROXY
-ENV HTTPS_PROXY=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY} \
+    ANDROID_SDK_ROOT=/opt/android-sdk ANDROID_HOME=/opt/android-sdk \
+    GRADLE_VERSION=8.13 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Debian packages come from the in-cluster artifact mirror (the build node has
+# no route to deb.debian.org). eclipse-temurin:21-jdk is Debian (bookworm).
+ARG ARTIFACT=http://artifact.worker.svc.cluster.local
+RUN rm -f /etc/apt/sources.list.d/* /etc/apt/sources.list \
+    && printf 'deb [trusted=yes] %s/artifacts/debian/debian bookworm main\n' "${ARTIFACT}" > /etc/apt/sources.list.d/artifact.list \
+    && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      curl unzip ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Android SDK: cmdline-tools + the platform/build-tools the app compiles against.
+RUN mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools" \
+    && curl -fsSL -o /tmp/cmdtools.zip \
+         "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" \
+    && unzip -q /tmp/cmdtools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools" \
+    && mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest" \
+    && rm -f /tmp/cmdtools.zip \
+    && yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+RUN "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+      "platform-tools" "platforms;android-35" "build-tools;35.0.0" \
+    && rm -rf /tmp/* /var/tmp/*
+
+# gradle (the repo has no wrapper).
+RUN curl -fsSL -o /tmp/gradle.zip \
+      "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+    && unzip -q /tmp/gradle.zip -d /opt \
+    && ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle \
+    && rm -f /tmp/gradle.zip
 
 WORKDIR /src
 COPY . /src/
 RUN bash build-webui.sh && ls -la app/src/main/assets/webui
-RUN ./gradlew --no-daemon assembleRelease
+RUN gradle --no-daemon assembleRelease

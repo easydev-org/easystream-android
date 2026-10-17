@@ -71,6 +71,7 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
             path == "/" || path == "/index.html" -> respond(out, 200, "text/html; charset=utf-8", webuiIndex)
             path == "/app.js" -> respond(out, 200, "application/javascript; charset=utf-8", webuiJs)
             path == "/health" -> respond(out, 200, "text/plain", "ok")
+            path == "/capabilities" -> respond(out, 200, "application/json", Probe.toJSON())
             path == "/est/ws" -> wsPipe(sock, input, out, headers, mode, query.contains("audio=1"))
             path.startsWith("/a11y/") -> a11yRoute(out, path, query)
             else -> respond(out, 404, "text/plain", "not found")

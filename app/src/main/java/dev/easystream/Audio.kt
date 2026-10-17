@@ -37,6 +37,15 @@ object Audio {
         return AudioParams(ok, RATE, CHANNELS.toByte(), FRAME_MS.toByte())
     }
 
+    /**
+     * audioPath reports which capture backend produced PCM, for /capabilities.
+     * Mirrors the Linux daemon's AudioPath: "AudioPlaybackCapture" when the OS
+     * supports it, "None" otherwise. There is no separate "probing" state here
+     * because the check is a constant-time API-level test.
+     */
+    fun audioPath(): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) "AudioPlaybackCapture" else "None"
+
     data class AudioParams(val present: Boolean, val rate: Int, val channels: Byte, val ms: Byte)
 
     /** start begins capture once; `mp` is the MediaProjection grant. */

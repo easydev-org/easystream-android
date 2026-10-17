@@ -61,11 +61,17 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
         }
         val path = url.substringBefore('?')
         val query = url.substringAfter('?', "")
+        // View is the open default; only the control token upgrades to CONTROL.
+        val token = Auth.tokenFrom(headers, query)
+        val mode = Auth.authorize(token)
+        if (mode == Auth.Mode.VIEW && Auth.a11yIsMutation(path, query)) {
+            respond(out, 403, "text/plain", "read-only"); return
+        }
         when {
             path == "/" || path == "/index.html" -> respond(out, 200, "text/html; charset=utf-8", webuiIndex)
             path == "/app.js" -> respond(out, 200, "application/javascript; charset=utf-8", webuiJs)
             path == "/health" -> respond(out, 200, "text/plain", "ok")
-            path == "/est/ws" -> wsPipe(sock, input, out, headers)
+            path == "/est/ws" -> wsPipe(sock, input, out, headers, mode, query.contains("audio=1"))
             path.startsWith("/a11y/") -> a11yRoute(out, path, query)
             else -> respond(out, 404, "text/plain", "not found")
         }
@@ -176,19 +182,39 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
 
     // ── WebSocket (RFC 6455, server side, binary frames only) ───────────────
 
-    private fun wsPipe(sock: Socket, input: BufferedInputStream, out: OutputStream, headers: Map<String, String>) {
+    private fun wsPipe(sock: Socket, input: BufferedInputStream, out: OutputStream, headers: Map<String, String>, mode: Auth.Mode, wantAudio: Boolean) {
         val key = headers["sec-websocket-key"] ?: return
         val accept = Base64.encodeToString(
             MessageDigest.getInstance("SHA-1").digest((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").toByteArray()),
             Base64.NO_WRAP,
         )
+        // Browsers REQUIRE the server to echo a subprotocol when the client
+        // offered one, or they fail the connection. Echo "est" (never the token).
+        val proto = headers["sec-websocket-protocol"]?.split(",")?.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() } ?: "est"
         out.write(
             ("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
-                "Sec-WebSocket-Accept: $accept\r\n\r\n").toByteArray(),
+                "Sec-WebSocket-Accept: $accept\r\nSec-WebSocket-Protocol: $proto\r\n\r\n").toByteArray(),
         )
         out.flush()
 
         val est = Socket("127.0.0.1", estPort)
+        // Propagate the mode to est with an Auth frame (defence in depth).
+        run {
+            val estOut0 = est.getOutputStream()
+            if (!Auth.isOpen) {
+                val tok = (if (mode == Auth.Mode.CONTROL) System.getenv("EAZYSTREAM_CONTROL_TOKEN")
+                           else System.getenv("EAZYSTREAM_VIEW_TOKEN")) ?: ""
+                val tb = tok.toByteArray()
+                val hdr = ByteArray(6)
+                hdr[0] = 0x03
+                hdr[2] = ((tb.size shr 24) and 0xff).toByte(); hdr[3] = ((tb.size shr 16) and 0xff).toByte()
+                hdr[4] = ((tb.size shr 8) and 0xff).toByte(); hdr[5] = (tb.size and 0xff).toByte()
+                estOut0.write(hdr); estOut0.write(tb); estOut0.flush()
+            }
+            if (wantAudio) {
+                estOut0.write(ByteArray(6).also { it[0] = 0x06 }); estOut0.flush()
+            }
+        }
         val wmu = Object()
         val readerThread = thread(name = "ws-est") {
             val buf = ByteArray(1 shl 16)
@@ -207,6 +233,8 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
             val estOut = est.getOutputStream()
             while (true) {
                 val frame = wsRead(input) ?: break
+                // View mode: drop mutation frames before they reach est.
+                if (mode == Auth.Mode.VIEW && frame.isNotEmpty() && Auth.isMutation(frame[0].toInt() and 0xff)) continue
                 estOut.write(frame); estOut.flush()
             }
         } catch (_: Exception) {

@@ -47,6 +47,11 @@ class Est(private val port: Int) {
             }
         }
         private const val T_VIDEO = 0x02
+        private const val T_AUTH = 0x03
+        private const val T_AUTH_OK = 0x04
+        private const val T_AUDIO = 0x05
+        private const val T_AUDIO_REQ = 0x06
+        private const val T_AUDIO_OFF = 0x07
         private const val T_MOVE = 0x10
         private const val T_BUTTON = 0x11
         private const val T_SCROLL = 0x12
@@ -115,16 +120,29 @@ class Est(private val port: Int) {
             val sz = Screen.encoderSizePublic(1)
             val w = sz?.first ?: 1920
             val h = sz?.second ?: 1080
-            val hello = ByteArray(7)
+            val hello = ByteArray(7 + 8)
             hello[0] = 1; hello[1] = 1
             hello[2] = ((w shr 8) and 0xff).toByte(); hello[3] = (w and 0xff).toByte()
             hello[4] = ((h shr 8) and 0xff).toByte(); hello[5] = (h and 0xff).toByte()
             hello[6] = 30
+            // Audio block @7: present, codec(1=Opus), rate(u32), ch, frameMs.
+            val (hasAudio, aRate, aCh, aMs) = Audio.params()
+            hello[7] = if (hasAudio) 1 else 0
+            hello[8] = 1
+            hello[9] = ((aRate shr 24) and 0xff).toByte(); hello[10] = ((aRate shr 16) and 0xff).toByte()
+            hello[11] = ((aRate shr 8) and 0xff).toByte(); hello[12] = (aRate and 0xff).toByte()
+            hello[13] = aCh; hello[14] = aMs
             writeFrame(T_HELLO, hello)
 
             // Subscribe to the SHARED capture+encode pipeline (one VirtualDisplay
             // for the whole process, fanned out to every connection).
             val unsub = Video.subscribe { au -> writeFrame(T_VIDEO, au) }
+            // Audio: subscribe this connection to the shared Opus pipeline.
+            if (hasAudio) {
+                Audio.subscribe(Screen.projection) { pkt ->
+                    if (audioOn) writeFrame(T_AUDIO, pkt)
+                }
+            }
             try {
                 val input = DataInputStream(sock.getInputStream())
                 val hdr = ByteArray(6)
@@ -156,6 +174,10 @@ class Est(private val port: Int) {
         (v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte(),
     )
 
+    // Access mode for THIS connection; View unless a valid token arrives.
+    @Volatile private var mode: Auth.Mode = if (Auth.isOpen) Auth.Mode.CONTROL else Auth.Mode.VIEW
+    // Whether this connection wants Audio frames (turned on by AudioReq).
+    @Volatile private var audioOn = false
     @Volatile private var lastX = 0f
     @Volatile private var lastY = 0f
     // Mouse press/drag: a click is a press+release at ~the same spot, a DRAG is
@@ -168,6 +190,17 @@ class Est(private val port: Int) {
 
     private fun dispatch(typ: Int, b: ByteArray, write: (Int, ByteArray) -> Unit) {
         val svc = A11yService.instance
+        if (typ == T_AUTH) {
+            val tok = String(b, Charsets.UTF_8)
+            mode = Auth.authorize(tok)
+            write(T_AUTH_OK, byteArrayOf(mode.v.toByte()))
+            android.util.Log.i("est", "auth -> $mode")
+            return
+        }
+        if (typ == T_AUDIO_REQ) { audioOn = true; return }
+        if (typ == T_AUDIO_OFF) { audioOn = false; return }
+        // View mode: drop every frame that would CHANGE the guest.
+        if (mode == Auth.Mode.VIEW && Auth.isMutation(typ)) return
         when (typ) {
             // Mouse: a REAL pointer (hover + buttons + scroll).
             T_MOVE -> { lastX = u16(b, 0).toFloat(); lastY = u16(b, 2).toFloat() }

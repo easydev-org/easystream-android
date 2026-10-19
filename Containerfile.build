@@ -21,7 +21,7 @@ ENV HTTPS_PROXY=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY} \
 
 # Debian packages come from the in-cluster artifact mirror (the build node has
 # no route to deb.debian.org). eclipse-temurin:21-jdk is Debian (bookworm).
-ARG ARTIFACT=http://artifact.worker.svc.cluster.local
+ARG ARTIFACT=http://172.18.41.95
 RUN rm -f /etc/apt/sources.list.d/* /etc/apt/sources.list \
     && printf 'deb [trusted=yes] %s/artifacts/debian/debian bookworm main\n' "${ARTIFACT}" > /etc/apt/sources.list.d/artifact.list \
     && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \

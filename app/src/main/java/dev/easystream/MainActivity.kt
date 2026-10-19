@@ -36,6 +36,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Install the control token from the launch Intent BEFORE anything
+        // touches Auth (the services are already live). `am start --es
+        // controlToken <t>` is how the sandbox entrypoint passes it; an APK's
+        // System.getenv never sees that. Absent => auth stays open (dev).
+        Auth.install(
+            intent?.getStringExtra("controlToken"),
+            intent?.getStringExtra("viewToken"),
+        )
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 96, 48, 48)

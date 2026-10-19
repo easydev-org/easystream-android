@@ -22,17 +22,35 @@ package dev.easystream
 object Auth {
     enum class Mode(val v: Int) { VIEW(0), CONTROL(1) }
 
-    private val control: String? = System.getenv("EAZYSTREAM_CONTROL_TOKEN")?.takeIf { it.isNotEmpty() }
-    private val view: String? = System.getenv("EAZYSTREAM_VIEW_TOKEN")?.takeIf { it.isNotEmpty() }
+    // The token is injected at runtime (MainActivity reads it from the launch
+    // Intent) because an APK's System.getenv never sees `am start`'s env, and
+    // `am start --es controlToken` is how the sandbox entrypoint passes it.
+    // getenv stays as a fallback for a debuggable build launched from a shell.
+    @Volatile private var injectedControl: String? = null
+    @Volatile private var injectedView: String? = null
+
+    /** install records the tokens the app was launched with. Call once, early. */
+    fun install(control: String?, view: String?) {
+        injectedControl = control?.takeIf { it.isNotEmpty() }
+        injectedView = view?.takeIf { it.isNotEmpty() }
+    }
+
+    private val control: String?
+        get() = injectedControl ?: System.getenv("EAZYSTREAM_CONTROL_TOKEN")?.takeIf { it.isNotEmpty() }
+    private val view: String?
+        get() = injectedView ?: System.getenv("EAZYSTREAM_VIEW_TOKEN")?.takeIf { it.isNotEmpty() }
 
     /** True when no token is configured at all (auth disabled). */
-    val isOpen: Boolean = control == null && view == null
+    val isOpen: Boolean get() = control == null && view == null
 
     /** authorize maps a presented token to a Mode; it NEVER fails (view default). */
     fun authorize(token: String?): Mode {
         if (isOpen) return Mode.CONTROL
         val t = token ?: ""
-        if (control != null && ctEq(t, control)) return Mode.CONTROL
+        // Read once into a local: `control` has a custom getter, so Kotlin
+        // cannot smart-cast it (and reading it twice could race install()).
+        val c = control
+        if (c != null && ctEq(t, c)) return Mode.CONTROL
         return Mode.VIEW
     }
 

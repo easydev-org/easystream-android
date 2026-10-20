@@ -34,11 +34,25 @@ jobs:
 
       - name: Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # Pin the packages instead of letting the action install its default
+          # "tools" package, which is no longer published and made the step fail
+          # with:
+          #   Warning: Failed to find package 'tools'
+          packages: ""
 
       - name: SDK packages
         run: |
-          sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          # Only what the build actually needs. `tools` is a legacy package that
+          # Google stopped publishing, so asking for it fails.
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+          echo "--- installed ---"
+          sdkmanager --list_installed | head -20
 
       - uses: gradle/actions/setup-gradle@v4
         with:

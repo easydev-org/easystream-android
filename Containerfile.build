@@ -50,7 +50,12 @@ RUN curl -fsSL -o /tmp/gradle.zip \
 
 WORKDIR /src
 COPY . /src/
-RUN bash build-webui.sh && ls -la app/src/main/assets/webui
+# WEBUI_CACHEBUST must change whenever the webui does. The webui is fetched at
+# build time from a separate repo, so its contents are invisible to Docker's
+# layer cache: without this, `RUN bash build-webui.sh` was CACHED and the APK kept
+# shipping the previous app.js (39538 bytes) while the repo had the new one.
+ARG WEBUI_CACHEBUST=none
+RUN WEBUI_CACHEBUST="${WEBUI_CACHEBUST}" bash build-webui.sh && ls -la app/src/main/assets/webui
 RUN gradle --no-daemon assembleRelease
 
 # assembleRelease produces an UNSIGNED apk, which the guest's `adb install`

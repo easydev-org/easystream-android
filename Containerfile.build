@@ -1,29 +1,28 @@
 # Build the Android easystream APK with the SHARED web UI packaged.
 #
-# Base is an official Docker Hub image (eclipse-temurin = library namespace);
-# the Android SDK + gradle are installed here because there is no official
-# Android SDK image. buildkitd mirrors docker.io to the in-cluster registry, so
-# `FROM docker.io/...` resolves without internet.
+# Base is an official Docker Hub image (eclipse-temurin = library namespace); the
+# Android SDK + gradle are installed here because there is no official Android
+# SDK image.
 #
-#   buildctl build --frontend dockerfile.v0 \
-#     --local context=. --local dockerfile=. --opt filename=Containerfile.build \
-#     --opt build-arg:HTTPS_PROXY=http://mihomo.develop.svc.cluster.local:7890
+# Plain, self-contained build: no proxy settings, no private registries, no
+# mirror addresses. It behaves identically on a laptop, on CI, and in a cluster.
+# Egress configuration, if any, belongs to the builder.
+#
+#   docker build -f Containerfile.build .
 ARG REGISTRY=docker.io/library
 FROM ${REGISTRY}/eclipse-temurin:21-jdk
 
 ARG WEBUI_REF=main
-ARG HTTPS_PROXY
-ARG HTTP_PROXY
-ENV HTTPS_PROXY=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY} \
-    ANDROID_SDK_ROOT=/opt/android-sdk ANDROID_HOME=/opt/android-sdk \
+ENV ANDROID_SDK_ROOT=/opt/android-sdk ANDROID_HOME=/opt/android-sdk \
     GRADLE_VERSION=8.13 \
     DEBIAN_FRONTEND=noninteractive
 
-# Debian packages come from the in-cluster artifact mirror (the build node has
-# no route to deb.debian.org). eclipse-temurin:21-jdk is Debian (bookworm).
-ARG ARTIFACT=http://172.18.41.95
+# Debian packages from Aliyun over HTTPS. eclipse-temurin:21-jdk is bookworm.
+# HTTPS rather than http: some egress proxies refuse plain http:// and report it
+# as a missing Release file.
 RUN rm -f /etc/apt/sources.list.d/* /etc/apt/sources.list \
-    && printf 'deb [trusted=yes] %s/artifacts/debian/debian bookworm main\n' "${ARTIFACT}" > /etc/apt/sources.list.d/artifact.list \
+    && printf 'deb https://mirrors.aliyun.com/debian bookworm main\n' > /etc/apt/sources.list \
+    && printf 'deb https://mirrors.aliyun.com/debian bookworm-updates main\n' >> /etc/apt/sources.list \
     && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt-get update && apt-get install -y --no-install-recommends \
       curl unzip ca-certificates \

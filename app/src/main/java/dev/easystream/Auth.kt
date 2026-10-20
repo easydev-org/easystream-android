@@ -43,6 +43,25 @@ object Auth {
     /** True when no token is configured at all (auth disabled). */
     val isOpen: Boolean get() = control == null && view == null
 
+    /**
+     * tokenFor returns the token that corresponds to a mode.
+     *
+     * This exists because the HTTP/WebSocket bridge must forward the mode to the
+     * est side by writing an Auth frame, and it used to read
+     * `System.getenv("EAZYSTREAM_CONTROL_TOKEN")` directly — which is ALWAYS null
+     * in an APK (an app never sees `am start`'s env). It therefore always sent an
+     * empty token, est answered View, the web panel saw view and refused to send
+     * input: the desktop was a picture no matter what the caller did.
+     *
+     * Everything must go through this (or [authorize]) so the value that was
+     * injected from the launch Intent is the one actually used.
+     */
+    fun tokenFor(mode: Mode): String =
+        when (mode) {
+            Mode.CONTROL -> control ?: ""
+            Mode.VIEW -> view ?: ""
+        }
+
     /** authorize maps a presented token to a Mode; it NEVER fails (view default). */
     fun authorize(token: String?): Mode {
         if (isOpen) return Mode.CONTROL

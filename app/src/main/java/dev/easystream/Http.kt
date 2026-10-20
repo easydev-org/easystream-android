@@ -1,6 +1,7 @@
 package dev.easystream
 
 import java.io.BufferedInputStream
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
@@ -203,8 +204,12 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
         run {
             val estOut0 = est.getOutputStream()
             if (!Auth.isOpen) {
-                val tok = (if (mode == Auth.Mode.CONTROL) System.getenv("EAZYSTREAM_CONTROL_TOKEN")
-                           else System.getenv("EAZYSTREAM_VIEW_TOKEN")) ?: ""
+                // MUST use Auth.tokenFor, not System.getenv: an APK never sees the
+                // environment of `am start`, so getenv returned null here, the
+                // AUTH frame carried an empty token, est stayed in View and the
+                // web panel disabled input — the desktop looked read-only even
+                // though the caller had the control token.
+                val tok = Auth.tokenFor(mode)
                 val tb = tok.toByteArray()
                 val hdr = ByteArray(6)
                 hdr[0] = 0x03
@@ -221,10 +226,31 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
             val buf = ByteArray(1 shl 16)
             val ins = est.getInputStream()
             try {
+                // The browser parses ONE est frame per WebSocket binary message,
+                // so the bridge must cut the est byte stream on est frame
+                // boundaries: a header of 6 bytes ([type][pad][len:u32 BE])
+                // followed by `len` payload bytes.
+                //
+                // Forwarding each raw `read()` result instead (the previous code)
+                // produced messages that held a partial header or two frames
+                // glued together. The panel then read `payload[0]` as the type,
+                // saw something that was not AuthOk (0x04), never called
+                // applyMode(), and left the desktop in its default read-only
+                // state — which is exactly why Android looked like View no matter
+                // what token was presented.
+                val hdr = ByteArray(6)
                 while (true) {
-                    val n = ins.read(buf)
-                    if (n <= 0) break
-                    synchronized(wmu) { wsWriteBinary(out, buf, n) }
+                    readFully(ins, hdr) || break
+                    val len = ((hdr[2].toInt() and 0xff) shl 24) or
+                        ((hdr[3].toInt() and 0xff) shl 16) or
+                        ((hdr[4].toInt() and 0xff) shl 8) or
+                        (hdr[5].toInt() and 0xff)
+                    val payload = ByteArray(len)
+                    if (len > 0 && !readFully(ins, payload)) break
+                    val msg = ByteArray(6 + len)
+                    System.arraycopy(hdr, 0, msg, 0, 6)
+                    if (len > 0) System.arraycopy(payload, 0, msg, 6, len)
+                    synchronized(wmu) { wsWriteBinary(out, msg, msg.size) }
                 }
             } catch (_: Exception) {}
             runCatching { est.close() }
@@ -300,6 +326,23 @@ class Http(private val ctx: android.content.Context, private val port: Int, priv
             if (c == '\n'.code) return sb.toString().trimEnd('\r')
             sb.append(c.toChar())
         }
+    }
+
+    /**
+     * readFully fills `dst` completely, or returns false if the stream ended
+     * first. The est side speaks a framed protocol ([type][pad][len:u32 BE] then
+     * payload); a plain read() may return half a header or several frames at
+     * once, and the browser parses exactly one est frame per WebSocket message —
+     * so the bridge has to respect frame boundaries.
+     */
+    private fun readFully(ins: InputStream, dst: ByteArray): Boolean {
+        var off = 0
+        while (off < dst.size) {
+            val n = ins.read(dst, off, dst.size - off)
+            if (n <= 0) return false
+            off += n
+        }
+        return true
     }
 
 }

@@ -1,0 +1,110 @@
+name: release
+
+# Build the Android APK and attach it to the GitHub Release for the pushed tag.
+#
+# The APK packages the shared web UI, which lives in another repository and is
+# downloaded at build time (build-webui.sh). That is a real trap, not a detail:
+# Gradle's layer cache and the CDN in front of codeload.github.com both happily
+# serve the PREVIOUS archive for the same URL, so a webui change silently did not
+# reach the APK — the build log said "app.js 45174 bytes" while the shipped APK
+# still carried 38365. WEBUI_CACHEBUST below makes both caches miss.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build assets for"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: SDK packages
+        run: |
+          sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      # The web UI. The cachebust is what makes a webui-only change visible;
+      # see the note at the top of this file.
+      - name: fetch the shared web UI
+        run: WEBUI_CACHEBUST="$(date +%s)" bash build-webui.sh
+
+      - name: assert the UI was really fetched
+        run: |
+          set -euo pipefail
+          f=app/src/main/assets/webui/app.js
+          [ -s "$f" ] || { echo "::error::$f missing"; exit 1; }
+          echo "app.js: $(wc -c <"$f") bytes, index.html: $(wc -c <app/src/main/assets/webui/index.html) bytes"
+
+      - name: test
+        run: gradle --no-daemon test
+
+      - name: build and sign
+        run: |
+          set -euo pipefail
+          gradle --no-daemon assembleRelease
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          # A throwaway debug key, same as the container build: the sandbox
+          # installs the APK with `adb install`, which accepts a debug signature.
+          keytool -genkeypair -keystore /tmp/debug.keystore -storepass android \
+            -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 \
+            -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          "$BT/zipalign" -f 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk /tmp/aligned.apk
+          "$BT/apksigner" sign --ks /tmp/debug.keystore --ks-pass pass:android \
+            --key-pass pass:android --out /tmp/easystream-android.apk /tmp/aligned.apk
+          "$BT/apksigner" verify /tmp/easystream-android.apk
+          ls -l /tmp/easystream-android.apk
+
+      # The APK must actually carry the UI. An APK without assets/webui installs
+      # and runs and then serves a blank page from :48078 — the exact symptom
+      # that cost a long debugging session once.
+      - name: assert the APK carries the UI
+        run: |
+          set -euo pipefail
+          unzip -l /tmp/easystream-android.apk | grep -q 'assets/webui/app.js' \
+            || { echo "::error::APK has no assets/webui/app.js"; exit 1; }
+          unzip -p /tmp/easystream-android.apk assets/webui/app.js | wc -c
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: /tmp/easystream-android.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/assets
+          merge-multiple: true
+      - run: ls -l /tmp/assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: /tmp/assets/easystream-android.apk
+          fail_on_unmatched_files: true
+          generate_release_notes: false

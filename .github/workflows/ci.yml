@@ -1,0 +1,72 @@
+name: ci
+
+# Check every push and pull request: build and test the APK.
+#
+# release.yml is tag-only, so a push to main ran nothing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # The default install asks for the legacy "tools" package, which Google
+          # no longer publishes: "Warning: Failed to find package 'tools'".
+          packages: ""
+
+      - name: SDK packages
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager --list_installed | head -20
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      # The APK packages the shared UI, fetched at build time. WEBUI_CACHEBUST
+      # makes both Gradle's layer cache and the CDN in front of codeload miss —
+      # without it a webui-only change silently does not reach the APK.
+      - name: fetch the shared web UI
+        run: WEBUI_CACHEBUST="$(date +%s)" bash build-webui.sh
+
+      - name: assert the UI was fetched
+        run: |
+          set -euo pipefail
+          f=app/src/main/assets/webui/app.js
+          test -s "$f"
+          echo "$f: $(wc -c <"$f") bytes"
+
+      - name: test
+        run: gradle --no-daemon test
+
+      - name: assemble
+        run: gradle --no-daemon assembleRelease
+
+      # An APK without the UI installs fine and then serves a blank page, which is
+      # a bug that already cost one long debugging session.
+      - name: assert the APK carries the UI
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/release/app-release-unsigned.apk
+          test -f "$apk"
+          unzip -l "$apk" | grep -q 'assets/webui/app.js'
+          echo "APK contains the UI"

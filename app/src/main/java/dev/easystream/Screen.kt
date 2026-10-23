@@ -363,15 +363,32 @@ typealias AuSink = (ByteArray) -> Unit
  * The first output carries SPS/PPS as CODEC_CONFIG; MediaCodec (surface mode)
  * emits them once, so we buffer and prepend them to every IDR.
  */
+/// streamAnnexB keeps the original signature (an integer downscale) for the
+/// CLI and the screenshot path.
 fun streamAnnexB(fps: Int, scale: Int, stop: () -> Boolean, sink: AuSink): String {
+    val (w, h, dpi) = Screen.encoderSizePublic(scale) ?: return "error: no size"
+    return streamAnnexBAt(w, h, dpi, fps, 12_000_000, stop, sink)
+}
+
+/// streamAnnexBAt encodes at an explicit geometry and bitrate.
+///
+/// The VirtualDisplay size must equal the ENCODER's size: a display at the raw
+/// screen size fed the encoder nothing, and one at a size the compositor cannot
+/// mirror produced only AUD packets. So when the quality presets ask for a
+/// different size, the projection itself is re-created at that size.
+fun streamAnnexBAt(
+    w: Int,
+    h: Int,
+    dpi: Int,
+    fps: Int,
+    bitrate: Int,
+    stop: () -> Boolean,
+    sink: AuSink,
+): String {
     val mp = Screen.projection ?: return "error: no MediaProjection grant"
-    // The VirtualDisplay size must equal the ENCODER's size (encodeSize(scale)),
-    // exactly like the working encode()/MediaRecorder paths. A display at the
-    // raw 1920x1080 screen size fed the encoder nothing.
-    val (w, h, dpi) = Screen.encoderSizePublic(scale)
     val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
         setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-        setInteger(MediaFormat.KEY_BIT_RATE, 12_000_000)
+        setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
         setInteger(MediaFormat.KEY_FRAME_RATE, fps)
         setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         // The VirtualDisplay is change-driven: a static screen emits NO frames.

@@ -25,6 +25,9 @@ class Est(private val port: Int) {
 
     companion object {
         private const val T_HELLO = 0x01
+        /// Run-time reconfiguration (EST.md 0x08/0x09).
+        private const val T_CONFIG_SET = 0x08
+        private const val T_CONFIG_ACK = 0x09
 
         /// injectKeyByName is the HTTP entry point for /a11y/key: it maps an
         /// A11Y_HTTP key name to the same handling the est T_KEY frame uses.
@@ -120,19 +123,7 @@ class Est(private val port: Int) {
             val sz = Screen.encoderSizePublic(1)
             val w = sz?.first ?: 1920
             val h = sz?.second ?: 1080
-            val hello = ByteArray(7 + 8)
-            hello[0] = 1; hello[1] = 1
-            hello[2] = ((w shr 8) and 0xff).toByte(); hello[3] = (w and 0xff).toByte()
-            hello[4] = ((h shr 8) and 0xff).toByte(); hello[5] = (h and 0xff).toByte()
-            hello[6] = 30
-            // Audio block @7: present, codec(1=Opus), rate(u32), ch, frameMs.
-            val (hasAudio, aRate, aCh, aMs) = Audio.params()
-            hello[7] = if (hasAudio) 1 else 0
-            hello[8] = 1
-            hello[9] = ((aRate shr 24) and 0xff).toByte(); hello[10] = ((aRate shr 16) and 0xff).toByte()
-            hello[11] = ((aRate shr 8) and 0xff).toByte(); hello[12] = (aRate and 0xff).toByte()
-            hello[13] = aCh; hello[14] = aMs
-            writeFrame(T_HELLO, hello)
+            writeFrame(T_HELLO, helloPayload(w, h))
 
             // Subscribe to the SHARED capture+encode pipeline (one VirtualDisplay
             // for the whole process, fanned out to every connection).
@@ -166,6 +157,40 @@ class Est(private val port: Int) {
         }
     }
 
+    /// Build a Hello for the CURRENT video configuration (EST.md).
+    ///
+    /// 27 bytes: the v1 core (7), the audio block (8), the video block at offset
+    /// 15 (8) and - because Android is the one platform where the two differ -
+    /// the encoded size at offset 23.
+    ///
+    /// Offsets 2..6 carry the DEVICE size and flags bit2 says so: this daemon's
+    /// input path is `input touchscreen`, which takes device pixels, while the
+    /// stream may be downscaled. A viewer that only knew the decoded size would
+    /// land every tap at the wrong point.
+    private fun helloPayload(devW: Int, devH: Int): ByteArray {
+        val cfg = VideoConfig
+        val encW = if (cfg.outputW != 0) cfg.outputW else devW
+        val encH = if (cfg.outputH != 0) cfg.outputH else devH
+        val hello = ByteArray(7 + 8 + 8 + 4)
+        hello[0] = 1; hello[1] = 1
+        hello[2] = ((devW shr 8) and 0xff).toByte(); hello[3] = (devW and 0xff).toByte()
+        hello[4] = ((devH shr 8) and 0xff).toByte(); hello[5] = (devH and 0xff).toByte()
+        hello[6] = cfg.frameRate.toByte()
+        val (hasAudio, aRate, aCh, aMs) = Audio.params()
+        hello[7] = if (hasAudio) 1 else 0
+        hello[8] = 1
+        hello[9] = ((aRate shr 24) and 0xff).toByte(); hello[10] = ((aRate shr 16) and 0xff).toByte()
+        hello[11] = ((aRate shr 8) and 0xff).toByte(); hello[12] = (aRate and 0xff).toByte()
+        hello[13] = aCh; hello[14] = aMs
+        val vb = cfg.helloBlock()
+        // bit2: offsets 2..6 are the INPUT size, not the decoded size.
+        vb[2] = (vb[2].toInt() or 4).toByte()
+        for (i in 0 until 8) hello[15 + i] = vb[i]
+        hello[23] = ((encW shr 8) and 0xff).toByte(); hello[24] = (encW and 0xff).toByte()
+        hello[25] = ((encH shr 8) and 0xff).toByte(); hello[26] = (encH and 0xff).toByte()
+        return hello
+    }
+
     private fun u16(b: ByteArray, o: Int): Int = ((b[o].toInt() and 0xff) shl 8) or (b[o + 1].toInt() and 0xff)
     private fun i16(b: ByteArray, o: Int): Int = u16(b, o).let { if (it >= 0x8000) it - 0x10000 else it }
     private fun u32(b: ByteArray, o: Int): Int =
@@ -195,6 +220,30 @@ class Est(private val port: Int) {
             mode = Auth.authorize(tok)
             write(T_AUTH_OK, byteArrayOf(mode.v.toByte()))
             android.util.Log.i("est", "auth -> $mode")
+            return
+        }
+        if (typ == T_CONFIG_SET) {
+            val (patch, err) = parseConfig(b)
+            if (err != null) {
+                System.err.println("est: ConfigSet parse failed: $err")
+                write(T_CONFIG_ACK, ackBody(false, err))
+                return
+            }
+            val refusal = VideoConfig.apply(patch!!)
+            if (refusal != null) {
+                System.err.println("est: ConfigSet rejected: $refusal")
+                write(T_CONFIG_ACK, ackBody(false, refusal))
+                return
+            }
+            System.err.println(
+                "est: ConfigSet ok -> ${VideoConfig.outputW}x${VideoConfig.outputH} " +
+                "fps=${VideoConfig.frameRate} br=${VideoConfig.bitRate} gen=${VideoConfig.generationNow}")
+            write(T_CONFIG_ACK, ackBody(true, ""))
+            // Android cannot resize the existing VirtualDisplay: MediaProjection
+            // allows createVirtualDisplay exactly once per token, and releasing
+            // it invalidates the token. The pipeline therefore restarts, which
+            // re-creates the projection through ControlService.
+            Video.restartForConfig()
             return
         }
         if (typ == T_AUDIO_REQ) { audioOn = true; return }
@@ -261,6 +310,65 @@ class Est(private val port: Int) {
             T_PING -> write(T_PONG, b)
             else -> dispatchA11y(typ, b, write)
         }
+    }
+
+    /// Parse a 0x08 ConfigSet body into a Patch.
+    ///
+    /// The cursor walks the frame strictly: every field knows its own length, and
+    /// a frame that ends early is an error, not a partial patch. Truncation is
+    /// the likeliest corruption here, and applying half of it would move the
+    /// stream somewhere nobody asked for.
+    private fun parseConfig(b: ByteArray): Pair<VideoConfig.Patch?, String?> {
+        var i = 0
+        fun need(n: Int) = i + n <= b.size
+        var width: Int? = null
+        var height: Int? = null
+        var fps: Int? = null
+        var bitrate: Int? = null
+        var encoder: Int? = null
+
+        if (!need(1)) return Pair(null, "truncated: hasWidth")
+        if (b[i].toInt() != 0) {
+            if (!need(3)) return Pair(null, "truncated: width")
+            width = u16(b, i + 1)
+        }
+        i += 3
+        if (!need(1)) return Pair(null, "truncated: hasHeight")
+        if (b[i].toInt() != 0) {
+            if (!need(3)) return Pair(null, "truncated: height")
+            height = u16(b, i + 1)
+        }
+        i += 3
+        if (!need(1)) return Pair(null, "truncated: hasFps")
+        if (b[i].toInt() != 0) {
+            if (!need(2)) return Pair(null, "truncated: fps")
+            fps = b[i + 1].toInt() and 0xff
+        }
+        i += 2
+        if (!need(1)) return Pair(null, "truncated: hasBitrate")
+        if (b[i].toInt() != 0) {
+            if (!need(5)) return Pair(null, "truncated: bitrate")
+            bitrate = u32(b, i + 1)
+        }
+        i += 5
+        if (!need(1)) return Pair(null, "truncated: hasEncoder")
+        if (b[i].toInt() != 0) {
+            if (!need(2)) return Pair(null, "truncated: encoder")
+            val e = b[i + 1].toInt() and 0xff
+            // 0xFF is the documented "let the server pick" value.
+            encoder = if (e == 0xFF) 0 else e
+        }
+        return Pair(VideoConfig.Patch(width, height, fps, bitrate, encoder), null)
+    }
+
+    /// Build a 0x09 ConfigAck body: ok byte, then a length-prefixed UTF-8 reason.
+    private fun ackBody(ok: Boolean, msg: String): ByteArray {
+        val m = msg.toByteArray(Charsets.UTF_8).take(255).toByteArray()
+        val out = ByteArray(2 + m.size)
+        out[0] = if (ok) 1 else 0
+        out[1] = m.size.toByte()
+        m.copyInto(out, 2)
+        return out
     }
 
     private fun dispatchA11y(typ: Int, b: ByteArray, write: (Int, ByteArray) -> Unit) {

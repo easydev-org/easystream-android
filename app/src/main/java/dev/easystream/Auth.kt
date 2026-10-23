@@ -77,7 +77,11 @@ object Auth {
     fun isMutation(typ: Int): Boolean = when (typ) {
         0x10, 0x11, 0x12, 0x13, 0x14, 0x15,  // pointer + keyboard + touch
         0x26,                                 // a11y ActionReq
-        0x32 -> true                          // ClipSet
+        0x32,                                 // ClipSet
+        // ConfigSet changes what EVERY viewer receives, so it belongs to the
+        // control plane: a read-only viewer must not be able to force a quality
+        // on everybody watching.
+        0x08 -> true
         else -> false
     }
 

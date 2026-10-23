@@ -129,7 +129,10 @@ class Est(private val port: Int) {
             // for the whole process, fanned out to every connection).
             val unsub = Video.subscribe { au -> writeFrame(T_VIDEO, au) }
             // Audio: subscribe this connection to the shared Opus pipeline.
-            if (hasAudio) {
+            // hasAudio is recomputed here because the Hello construction moved
+            // into helloPayload, which reads it privately.
+            val (hasAudioNow, _, _, _) = Audio.params()
+            if (hasAudioNow) {
                 Audio.subscribe(Screen.projection) { pkt ->
                     if (audioOn) writeFrame(T_AUDIO, pkt)
                 }

@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * Two geometries are kept apart: CAPTURE (the display) and OUTPUT (the encoder).
  * Every rule is a REFUSAL, never a clamp.
+ */
 object VideoConfig {
     /** Encoder codes, matching the EST.md video block. */
     const val ENC_UNKNOWN = 0

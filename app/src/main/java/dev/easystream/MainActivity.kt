@@ -73,6 +73,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /// onNewIntent is how a re-acquire actually arrives.
+    ///
+    /// ControlService starts this Activity with SINGLE_TOP|CLEAR_TOP, so when it
+    /// is already running Android delivers the new Intent HERE and never calls
+    /// onCreate again. The autoGrant check lived only in onCreate, so every
+    /// re-acquire after the first was silently ignored: the projection token had
+    /// already been consumed (MediaProjection allows createVirtualDisplay once
+    /// per token), createVirtualDisplay threw SecurityException, and the daemon
+    /// retried five times against a grant that nobody was renewing.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra("autoGrant", false)) {
+            window.decorView.postDelayed({ requestProjection() }, 400)
+        }
+    }
+
     private fun requestProjection() {
         val mpm = getSystemService(MediaProjectionManager::class.java)
         // Android 14+ (API 34) shows an extra "share a single app or the whole

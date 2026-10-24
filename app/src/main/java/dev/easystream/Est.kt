@@ -98,6 +98,23 @@ class Est(private val port: Int) {
         server = null
     }
 
+    /// Live connections, so a reconfiguration can be announced to all of them.
+    /// Hello is the only authoritative statement of geometry (EST.md): a client
+    /// that stays connected through a ConfigSet has no other way to learn that
+    /// the encoder is now emitting a different size.
+    private val live = java.util.concurrent.CopyOnWriteArrayList<(Int, ByteArray) -> Unit>()
+
+    /// Re-announce the current video configuration to every live connection.
+    private fun broadcastHello() {
+        val sz = Screen.encoderSizePublic(1)
+        val devW = sz?.first ?: 1920
+        val devH = sz?.second ?: 1080
+        val payload = helloPayload(devW, devH)
+        for (w in live) {
+            try { w(T_HELLO, payload) } catch (_: Exception) {}
+        }
+    }
+
     private fun handle(sock: Socket) {
         val out = DataOutputStream(sock.getOutputStream())
         val wmu = Object()
@@ -111,6 +128,9 @@ class Est(private val port: Int) {
             }
         }
 
+        // Register this connection's writer so broadcastHello() can reach it.
+        val sink: (Int, ByteArray) -> Unit = { t, pl -> writeFrame(t, pl) }
+        live.add(sink)
         try {
             // encoderSizePublic returns null until a MediaProjection grant
             // exists; destructuring null threw an NPE and killed the connection
@@ -157,6 +177,7 @@ class Est(private val port: Int) {
         } catch (e: Exception) {
             System.err.println("est conn: ${e.message}")
         } finally {
+            live.remove(sink)
             closed.set(true)
             try { sock.close() } catch (_: Exception) {}
         }
@@ -250,6 +271,10 @@ class Est(private val port: Int) {
                 "est: ConfigSet ok -> ${VideoConfig.outputW}x${VideoConfig.outputH} " +
                 "fps=${VideoConfig.frameRate} br=${VideoConfig.bitRate} gen=${VideoConfig.generationNow}")
             write(T_CONFIG_ACK, ackBody(true, ""))
+            // Tell EVERY viewer, not just the one that asked: Hello is the only
+            // authoritative statement of geometry, so a viewer that stays
+            // connected would otherwise keep decoding at the old size.
+            broadcastHello()
             // Android cannot resize the existing VirtualDisplay: MediaProjection
             // allows createVirtualDisplay exactly once per token, and releasing
             // it invalidates the token. The pipeline therefore restarts, which

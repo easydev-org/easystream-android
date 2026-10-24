@@ -376,6 +376,13 @@ fun streamAnnexB(fps: Int, scale: Int, stop: () -> Boolean, sink: AuSink): Strin
 /// screen size fed the encoder nothing, and one at a size the compositor cannot
 /// mirror produced only AUD packets. So when the quality presets ask for a
 /// different size, the projection itself is re-created at that size.
+/// LAST_PLI carries a pending keyframe request from the est dispatch into the
+/// encode loop. A timestamp rather than a bool so a request that arrives while
+/// the loop is busy is not lost: getAndSet(0) consumes it exactly once.
+/// Coalescing falls out of that - N requests between two loop iterations produce
+/// one IDR, which is what we want because an IDR costs many P-frames.
+val LAST_PLI = java.util.concurrent.atomic.AtomicLong(0L)
+
 fun streamAnnexBAt(
     w: Int,
     h: Int,
@@ -437,6 +444,11 @@ fun streamAnnexBAt(
     // "no first AU"). Requesting a sync frame + nudging the screen makes the
     // next encoded frame an IDR.
     var lastKeyReq = 0L
+    // PLI: a viewer that lost a frame asks for an IDR through KeyFrameReq. The
+    // periodic one-a-second request above is not enough - it is a keepalive, so
+    // a client that just corrupted its picture would wait up to a second. This
+    // flag is checked on every dequeue loop iteration instead.
+    LAST_PLI.set(0L)
     val syncParams = android.os.Bundle().apply {
         putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
     }
@@ -449,7 +461,13 @@ fun streamAnnexBAt(
             if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue
             if (idx < 0) {
                 val now = System.currentTimeMillis()
-                if (now - lastKeyReq > 1000) {
+                // A pending PLI wins over the 1 s keepalive: the client is showing
+                // a corrupt picture right now.
+                val pli = LAST_PLI.getAndSet(0L)
+                if (pli != 0L) {
+                    lastKeyReq = now
+                    try { codec.setParameters(syncParams) } catch (_: Exception) {}
+                } else if (now - lastKeyReq > 1000) {
                     lastKeyReq = now
                     try { codec.setParameters(syncParams) } catch (_: Exception) {}
                 }

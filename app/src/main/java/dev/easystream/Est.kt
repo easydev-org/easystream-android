@@ -28,6 +28,8 @@ class Est(private val port: Int) {
         /// Run-time reconfiguration (EST.md 0x08/0x09).
         private const val T_CONFIG_SET = 0x08
         private const val T_CONFIG_ACK = 0x09
+        /// Ask for an IDR without changing anything (EST.md 0x0A).
+        private const val T_KEYFRAME_REQ = 0x0A
 
         /// injectKeyByName is the HTTP entry point for /a11y/key: it maps an
         /// A11Y_HTTP key name to the same handling the est T_KEY frame uses.
@@ -223,6 +225,12 @@ class Est(private val port: Int) {
             mode = Auth.authorize(tok)
             write(T_AUTH_OK, byteArrayOf(mode.v.toByte()))
             android.util.Log.i("est", "auth -> $mode")
+            return
+        }
+        if (typ == T_KEYFRAME_REQ) {
+            // Not a mutation: no guest state changes, so a read-only viewer may
+            // recover from a corrupt picture.
+            LAST_PLI.set(System.currentTimeMillis())
             return
         }
         if (typ == T_CONFIG_SET) {
